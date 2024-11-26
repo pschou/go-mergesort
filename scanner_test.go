@@ -13,8 +13,8 @@ import (
 
 func ExampleNew() {
 	s := ms.New(context.TODO(), bufio.ScanLines, ms.BytesCompareDedup,
-		strings.NewReader("a\nc\nd\n"),
-		strings.NewReader("b\ne\nf\ng\n"),
+		strings.NewReader("a\nc\nd\nz\n"),
+		strings.NewReader("b\ne\nf\ng\nz\n"),
 		strings.NewReader("f\nz\n"),
 	)
 

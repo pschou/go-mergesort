@@ -134,8 +134,10 @@ func read(ctx context.Context, c chan (penny), r io.Reader, id int, split bufio.
 					err = bufio.ErrNegativeAdvance
 					return
 				}
-				if err == bufio.ErrFinalToken {
-					c <- penny{dat: tok, id: id}
+				if splitErr == bufio.ErrFinalToken {
+					if len(tok) > 0 {
+						c <- penny{dat: tok, id: id}
+					}
 					err = io.EOF
 					return
 				}
@@ -143,13 +145,19 @@ func read(ctx context.Context, c chan (penny), r io.Reader, id int, split bufio.
 					err = splitErr
 					return
 				}
-				if adv == 0 { // Nothing consumed
-					break
-				} else {
-					// Trim down the slice to what remains, return token, and loop
-					b = b[adv:]
-					total = total - adv
+				// Return the token if a value is returned
+				if len(tok) > 0 {
 					c <- penny{dat: tok, id: id}
+				}
+				// Trim down the slice to what remains and loop
+				b = b[adv:]
+				total = total - adv
+				if adv == 0 { // Nothing consumed
+					// If nothing was returned and we are on the last loop
+					if total > 0 && atEOF {
+						c <- penny{dat: b[:total], id: id}
+					}
+					break
 				}
 			}
 
@@ -219,7 +227,7 @@ func makeSorters(ctx context.Context, c chan (penny), split bufio.SplitFunc, com
 							c <- aDat // Send the flush or err
 						}
 						continue
-					} else {
+					} else if len(aDat.dat) > 0 {
 						hasA = true
 					}
 				}
@@ -233,7 +241,7 @@ func makeSorters(ctx context.Context, c chan (penny), split bufio.SplitFunc, com
 							c <- bDat // Send the flush or error
 						}
 						continue
-					} else {
+					} else if len(bDat.dat) > 0 {
 						hasB = true
 					}
 				}
@@ -249,6 +257,7 @@ func makeSorters(ctx context.Context, c chan (penny), split bufio.SplitFunc, com
 					hasB = false
 				} else if hasA && hasB {
 					x := comp(aDat.dat, bDat.dat, aDat.id, bDat.id)
+
 					switch x {
 					case -2: // A is wanted more, so it goes first and B is ignored
 						c <- aDat

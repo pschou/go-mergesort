@@ -12,7 +12,7 @@ import (
 )
 
 func ExampleNew() {
-	s := ms.New(context.TODO(), bufio.ScanLines,
+	s := ms.New(context.TODO(), bufio.ScanLines, ms.BytesCompareDedup,
 		strings.NewReader("a\nc\nd\n"),
 		strings.NewReader("b\ne\nf\ng\n"),
 		strings.NewReader("f\nz\n"),
@@ -28,7 +28,6 @@ func ExampleNew() {
 	// d
 	// e
 	// f
-	// f
 	// g
 	// z
 }
@@ -41,7 +40,7 @@ func ExampleNewWithoutScanFirst() {
 		strings.NewReader("x\ny\n"),
 	}
 
-	s := ms.New(context.TODO(), bufio.ScanLines, list...)
+	s := ms.New(context.TODO(), bufio.ScanLines, ms.BytesCompare, list...)
 	s.Scan()
 	fmt.Println(s.Text())
 	// Output:
@@ -54,7 +53,7 @@ func ExampleFileReader() {
 	c, _ := os.Open("c")
 	list := []io.Reader{a, b, c}
 
-	s := ms.New(context.TODO(), bufio.ScanLines, list...)
+	s := ms.New(context.TODO(), bufio.ScanLines, ms.BytesCompare, list...)
 
 	out, _ := os.Create("out")
 	for s.Scan() {

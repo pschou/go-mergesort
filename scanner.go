@@ -34,6 +34,7 @@ type Scanner struct {
 type penny struct {
 	// Pointer to data which is next in this sort pool.
 	dat []byte
+	id  int
 	// Pass up of any errors
 	err error
 	// We crossed a boundary mark and the old memory pool can be released once we
@@ -93,7 +94,7 @@ func (s *Scanner) Scan() bool {
 	}
 }
 
-func read(ctx context.Context, c chan (penny), r io.Reader, split bufio.SplitFunc) {
+func read(ctx context.Context, c chan (penny), r io.Reader, id int, split bufio.SplitFunc) {
 	var (
 		n     int // read size
 		total int // total size read
@@ -134,7 +135,7 @@ func read(ctx context.Context, c chan (penny), r io.Reader, split bufio.SplitFun
 					return
 				}
 				if err == bufio.ErrFinalToken {
-					c <- penny{dat: tok}
+					c <- penny{dat: tok, id: id}
 					err = io.EOF
 					return
 				}
@@ -148,7 +149,7 @@ func read(ctx context.Context, c chan (penny), r io.Reader, split bufio.SplitFun
 					// Trim down the slice to what remains, return token, and loop
 					b = b[adv:]
 					total = total - adv
-					c <- penny{dat: tok}
+					c <- penny{dat: tok, id: id}
 				}
 			}
 
@@ -170,17 +171,17 @@ func read(ctx context.Context, c chan (penny), r io.Reader, split bufio.SplitFun
 	}
 }
 
-func makeSorters(ctx context.Context, c chan (penny), split bufio.SplitFunc, list ...io.Reader) {
+func makeSorters(ctx context.Context, c chan (penny), split bufio.SplitFunc, comp CompareFunc, list []io.Reader, idx []int) {
 	if len(list) == 1 {
 		// Handle the case when one reader is given
-		go read(ctx, c, list[0], split)
+		go read(ctx, c, list[0], idx[0], split)
 		return
 	}
 	mid := len(list) / 2
 	a := make(chan (penny), 2)
 	b := make(chan (penny), 2)
-	makeSorters(ctx, a, split, list[:mid]...)
-	makeSorters(ctx, b, split, list[mid:]...)
+	makeSorters(ctx, a, split, comp, list[:mid], idx[:mid])
+	makeSorters(ctx, b, split, comp, list[mid:], idx[mid:])
 	go func() {
 		defer func() {
 			for {
@@ -247,11 +248,21 @@ func makeSorters(ctx context.Context, c chan (penny), split bufio.SplitFunc, lis
 					c <- bDat
 					hasB = false
 				} else if hasA && hasB {
-					if bytes.Compare(aDat.dat, bDat.dat) < 0 {
+					x := comp(aDat.dat, bDat.dat, aDat.id, bDat.id)
+					switch x {
+					case -2: // A is wanted more, so it goes first and B is ignored
 						c <- aDat
 						hasA = false
-					} else {
+						hasB = false
+					case -1, 0: // A is less, so it goes first
+						c <- aDat
+						hasA = false
+					case 1: // B is less, so it goes first
 						c <- bDat
+						hasB = false
+					case 2: // B is wanted more, so it goes first and A is ignored
+						c <- bDat
+						hasA = false
 						hasB = false
 					}
 				} else {
@@ -262,18 +273,44 @@ func makeSorters(ctx context.Context, c chan (penny), split bufio.SplitFunc, lis
 	}()
 }
 
+// Compare returns an integer comparing two byte slices lexicographically. The
+// result will be 0 if a == b, -1 if a < b, and +1 if a > b. A nil argument is
+// equivalent to an empty slice.
+//
+// Filtering by record is also possible, if -2 is provided then only a will be
+// used and if +2 is provided then only b will be used.
+type CompareFunc func(a, b []byte, ai, bi int) int
+
+// Simple comparison function
+func BytesCompare(a, b []byte, ai, bi int) int {
+	return bytes.Compare(a, b)
+}
+
+// Simple comparison function with deduplication between files
+func BytesCompareDedup(a, b []byte, ai, bi int) (c int) {
+	c = bytes.Compare(a, b)
+	if c == 0 {
+		c = -2
+	}
+	return
+}
+
 // NewScanner returns a new Scanner to read from a set of scanners which expect
 // ordered input.
 //
 // As the bulk of the sorting is done in goroutines and in the background, the
 // context is the best method to cancel any on-going sorting functions.
-func New(ctx context.Context, split bufio.SplitFunc, list ...io.Reader) *Scanner {
+func New(ctx context.Context, split bufio.SplitFunc, comp CompareFunc, list ...io.Reader) *Scanner {
 	c := make(chan (penny), 2)
 	myCtx, cancel := context.WithCancel(ctx)
 	// The sorters do the bulk of the work (in parallel).  The ideal scenaio of
 	// worker routines is a triangle number where if there are N inputs N(N-1)/2
 	// sorters are allocated.
-	makeSorters(ctx, c, split, list...)
+	idx := make([]int, len(list))
+	for i := range idx {
+		idx[i] = i
+	}
+	makeSorters(ctx, c, split, comp, list, idx)
 	return &Scanner{
 		ctx:    myCtx,
 		cancel: cancel,

@@ -9,7 +9,7 @@ import (
 )
 
 func ExampleNew() {
-  s := ms.New(context.TODO(), bufio.ScanLines,
+  s := ms.New(context.TODO(), bufio.ScanLines, ms.BytesCompareDedup,
     strings.NewReader("a\nc\nd\n"),
     strings.NewReader("b\ne\nf\ng\n"),
     strings.NewReader("f\nz\n"),
@@ -24,7 +24,6 @@ func ExampleNew() {
   // c
   // d
   // e
-  // f
   // f
   // g
   // z

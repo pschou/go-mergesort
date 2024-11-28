@@ -1,7 +1,6 @@
 package mergesort_test
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -12,7 +11,7 @@ import (
 )
 
 func ExampleNew() {
-	s := ms.New(context.TODO(), bufio.ScanLines, ms.BytesCompareDedup,
+	s := ms.New(context.TODO(), ms.ScanLines, ms.BytesCompareDedup,
 		strings.NewReader("a\nc\nd\nz\n"),
 		strings.NewReader("b\ne\nf\ng\nz\n"),
 		strings.NewReader("f\nz\n"),
@@ -40,7 +39,7 @@ func ExampleNewWithoutScanFirst() {
 		strings.NewReader("x\ny\n"),
 	}
 
-	s := ms.New(context.TODO(), bufio.ScanLines, ms.BytesCompare, list...)
+	s := ms.New(context.TODO(), ms.ScanLines, ms.BytesCompare, list...)
 	s.Scan()
 	fmt.Println(s.Text())
 	// Output:
@@ -53,7 +52,7 @@ func ExampleFileReader() {
 	c, _ := os.Open("c")
 	list := []io.Reader{a, b, c}
 
-	s := ms.New(context.TODO(), bufio.ScanLines, ms.BytesCompare, list...)
+	s := ms.New(context.TODO(), ms.ScanLines, ms.BytesCompare, list...)
 
 	out, _ := os.Create("out")
 	for s.Scan() {

@@ -94,7 +94,7 @@ func (s *Scanner) Scan() bool {
 	}
 }
 
-func read(ctx context.Context, c chan (penny), r io.Reader, id int, split bufio.SplitFunc) {
+func read(ctx context.Context, c chan (penny), r io.Reader, id int, split SplitFunc) {
 	var (
 		n     int // read size
 		total int // total size read
@@ -126,7 +126,7 @@ func read(ctx context.Context, c chan (penny), r io.Reader, id int, split bufio.
 
 			// Slice the input buffer into tokens and send them to the chan
 			for total > 0 {
-				adv, tok, splitErr = split(b[:total], atEOF)
+				adv, tok, splitErr = split(b[:total], atEOF, id)
 				if adv > total {
 					err = bufio.ErrAdvanceTooFar
 					return
@@ -179,7 +179,7 @@ func read(ctx context.Context, c chan (penny), r io.Reader, id int, split bufio.
 	}
 }
 
-func makeSorters(ctx context.Context, c chan (penny), split bufio.SplitFunc, comp CompareFunc, list []io.Reader, idx []int) {
+func makeSorters(ctx context.Context, c chan (penny), split SplitFunc, comp CompareFunc, list []io.Reader, idx []int) {
 	if len(list) == 1 {
 		// Handle the case when one reader is given
 		go read(ctx, c, list[0], idx[0], split)
@@ -290,6 +290,33 @@ func makeSorters(ctx context.Context, c chan (penny), split bufio.SplitFunc, com
 // used and if +2 is provided then only b will be used.
 type CompareFunc func(a, b []byte, ai, bi int) int
 
+// SplitFunc is the signature of the split function used to tokenize the input.
+// The arguments are an initial substring of the remaining unprocessed data and
+// a flag, atEOF, that reports whether the [Reader] has no more data to give,
+// and i, which is the index of the [Reader] input. The return values are the
+// number of bytes to advance the input and the next token to return to the
+// user, if any, plus an error, if any.
+//
+// Scanning stops if the function returns an error, in which case some of the
+// input may be discarded. If that error is [ErrFinalToken], scanning stops
+// with no error. A non-nil token delivered with [ErrFinalToken] will be the
+// last token, and a nil token with [ErrFinalToken] immediately stops the
+// scanning.
+//
+// Otherwise, the [Scanner] advances the input. If the token is not nil, the
+// [Scanner] returns it to the user. If the token is nil, the Scanner reads
+// more data and continues scanning; if there is no more data--if atEOF was
+// true--the [Scanner] returns. If the data does not yet hold a complete token,
+// for instance if it has no newline while scanning lines, a [SplitFunc] can
+// return (0, nil, nil) to signal the [Scanner] to read more data into the
+// slice and try again with a longer slice starting at the same point in the
+// input.
+//
+// The function is never called with an empty data slice unless atEOF is true.
+// If atEOF is true, however, data may be non-empty and, as always, holds
+// unprocessed text.
+type SplitFunc func(data []byte, atEOF bool, i int) (advance int, token []byte, err error)
+
 // Simple comparison function
 func BytesCompare(a, b []byte, ai, bi int) int {
 	return bytes.Compare(a, b)
@@ -304,12 +331,21 @@ func BytesCompareDedup(a, b []byte, ai, bi int) (c int) {
 	return
 }
 
+// ScanLines is a split function for a [Scanner] that returns each line of
+// text, stripped of any trailing end-of-line marker. The returned line may be
+// empty. The end-of-line marker is one optional carriage return followed by
+// one mandatory newline. In regular expression notation, it is `\r?\n`.  The
+// last non-empty line of input will be returned even if it has no newline.
+func ScanLines(data []byte, atEOF bool, i int) (advance int, token []byte, err error) {
+	return bufio.ScanLines(data, atEOF)
+}
+
 // NewScanner returns a new Scanner to read from a set of scanners which expect
 // ordered input.
 //
 // As the bulk of the sorting is done in goroutines and in the background, the
 // context is the best method to cancel any on-going sorting functions.
-func New(ctx context.Context, split bufio.SplitFunc, comp CompareFunc, list ...io.Reader) *Scanner {
+func New(ctx context.Context, split SplitFunc, comp CompareFunc, list ...io.Reader) *Scanner {
 	c := make(chan (penny), 2)
 	myCtx, cancel := context.WithCancel(ctx)
 	// The sorters do the bulk of the work (in parallel).  The ideal scenaio of

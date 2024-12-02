@@ -186,8 +186,8 @@ func makeSorters(ctx context.Context, c chan (penny), split SplitFunc, comp Comp
 		return
 	}
 	mid := len(list) / 2
-	a := make(chan (penny), 20)
-	b := make(chan (penny), 20)
+	a := make(chan (penny), 10)
+	b := make(chan (penny), 10)
 	makeSorters(ctx, a, split, comp, list[:mid], idx[:mid], nil)
 	makeSorters(ctx, b, split, comp, list[mid:], idx[mid:], nil)
 	go func() {

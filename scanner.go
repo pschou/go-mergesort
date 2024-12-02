@@ -179,17 +179,17 @@ func read(ctx context.Context, c chan (penny), r io.Reader, id int, split SplitF
 	}
 }
 
-func makeSorters(ctx context.Context, c chan (penny), split SplitFunc, comp CompareFunc, list []io.Reader, idx []int) {
+func makeSorters(ctx context.Context, c chan (penny), split SplitFunc, comp CompareFunc, list []io.Reader, idx []int, cancel func()) {
 	if len(list) == 1 {
 		// Handle the case when one reader is given
 		go read(ctx, c, list[0], idx[0], split)
 		return
 	}
 	mid := len(list) / 2
-	a := make(chan (penny), 2)
-	b := make(chan (penny), 2)
-	makeSorters(ctx, a, split, comp, list[:mid], idx[:mid])
-	makeSorters(ctx, b, split, comp, list[mid:], idx[mid:])
+	a := make(chan (penny), 20)
+	b := make(chan (penny), 20)
+	makeSorters(ctx, a, split, comp, list[:mid], idx[:mid], nil)
+	makeSorters(ctx, b, split, comp, list[mid:], idx[mid:], nil)
 	go func() {
 		defer func() {
 			for {
@@ -247,6 +247,9 @@ func makeSorters(ctx context.Context, c chan (penny), split SplitFunc, comp Comp
 				}
 				if !hasA && !hasB {
 					c <- penny{err: io.EOF}
+					if cancel != nil {
+						cancel()
+					}
 					return
 				}
 				if hasA && !hasB {
@@ -340,6 +343,11 @@ func ScanLines(data []byte, atEOF bool, i int) (advance int, token []byte, err e
 	return bufio.ScanLines(data, atEOF)
 }
 
+// Cancel will close all the go routines and clear up the channels.
+func (s *Scanner) Cancel() {
+	s.cancel()
+}
+
 // NewScanner returns a new Scanner to read from a set of scanners which expect
 // ordered input.
 //
@@ -355,7 +363,7 @@ func New(ctx context.Context, split SplitFunc, comp CompareFunc, list ...io.Read
 	for i := range idx {
 		idx[i] = i
 	}
-	makeSorters(ctx, c, split, comp, list, idx)
+	makeSorters(ctx, c, split, comp, list, idx, cancel)
 	return &Scanner{
 		ctx:    myCtx,
 		cancel: cancel,

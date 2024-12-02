@@ -191,19 +191,7 @@ func makeSorters(ctx context.Context, c chan (penny), split SplitFunc, comp Comp
 	makeSorters(ctx, a, split, comp, list[:mid], idx[:mid], nil)
 	makeSorters(ctx, b, split, comp, list[mid:], idx[mid:], nil)
 	go func() {
-		defer func() {
-			for {
-				// Flush all channels
-				select {
-				case <-a:
-				case <-b:
-				default:
-					break
-				}
-			}
-			// Close return channel
-			close(c)
-		}()
+		defer close(c)
 		var (
 			aDat, bDat penny
 			aMore      = true

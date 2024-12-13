@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"sync"
 )
@@ -18,12 +19,16 @@ import (
 // sorting reusing the same bytes buffer.  Effort has been made to avoid any
 // memory copies.
 type Scanner struct {
-	// Slice pointer to the current element in memory
-	cur []byte
-	// Worker doing the top level of sorting
-	c chan (penny)
-	// Error pass up
-	err error
+	rdrs    []io.Reader // The readers provided by the client.
+	split   SplitFunc   // The function to split the tokens.
+	compare CompareFunc // The function to compare the tokens for sorting or deduplication.
+	filter  FilterFunc  // The function to filter lines for formatting after splitting.
+
+	cur        []byte        // Slice pointer to the current element.
+	c          chan (*penny) // Channel from the top level of sorting.
+	err        error         // Sticky error.
+	scanCalled bool          // Scan has been called; buffer is in use.
+	done       bool          // Scan finnished.
 
 	ctx    context.Context
 	cancel func()
@@ -32,14 +37,12 @@ type Scanner struct {
 // Unit of work, this is needed as the buffer needs to be returned to the pool
 // once the read boundary has been crossed.
 type penny struct {
-	// Pointer to data which is next in this sort pool.
-	dat []byte
-	id  int
-	// Pass up of any errors
-	err error
-	// We crossed a boundary mark and the old memory pool can be released once we
-	// are at this penny.
-	toFlush any
+	dat      []byte        // Pointer to data which is next in this sort pool.
+	datReady chan struct{} // If filtering is used, indicate that the data is ready for use.
+
+	id   int    // Index of file data is from.
+	err  error  // Pass up any errors.
+	toDo func() // Function todo upon completion.
 }
 
 // Pool to use for reading in the underlying data
@@ -62,31 +65,63 @@ func (s *Scanner) Bytes() []byte {
 	return s.cur
 }
 
+// Err returns the first non-EOF error that was encountered by the [Scanner].
+func (s *Scanner) Err() error {
+	if s.err == io.EOF {
+		return nil
+	}
+	return s.err
+}
+
 // Scan advances the Scanner to the next token, which will then be available
 // through the Scanner.Bytes or Scanner.Text method. It returns false when
 // there are no more tokens, either by reaching the end of the input or an
 // error.
 func (s *Scanner) Scan() bool {
-	if s.err != nil {
-		// No more reads are possible
+	if s.done {
 		return false
 	}
+	if !s.scanCalled {
+		s.scanCalled = true
+
+		// The sorters do the bulk of the work (in parallel).  The ideal scenaio of
+		// worker routines is a triangle number where if there are N inputs N(N-1)/2
+		// sorters are allocated.
+		idx := make([]int, len(s.rdrs))
+		for i := range idx {
+			idx[i] = i
+		}
+		s.c = make(chan (*penny), 10)
+		makeSorters(s.ctx, s.c, s.split, s.compare, s.filter, s.rdrs, idx, s.cancel)
+	}
+
 	ctr := 0
 	for {
-		ctr++
-		if ctr > 10 {
-			return false
+		if ctr++; ctr > 1000 {
+			s.cancel()
+			for cleanup := range s.c {
+				if cleanup.toDo != nil {
+					cleanup.toDo()
+				}
+			}
+			s.done = true
+			panic("Too many reads without any data")
 		}
-		t, _ := <-s.c
-		if t.toFlush != nil {
-			// Return previous memory buffer to pool
-			pool.Put(t.toFlush)
+		t, more := <-s.c
+		s.done = !more
+		if t.toDo != nil {
+			t.toDo()
 			continue
 		}
 		if t.err != nil {
 			// Error was encountered, terminate read
-			s.err = t.err
+			s.err, s.done = t.err, true
 			s.cancel()
+			for cleanup := range s.c {
+				if cleanup.toDo != nil {
+					cleanup.toDo()
+				}
+			}
 			return false
 		}
 		s.cur = t.dat
@@ -94,7 +129,7 @@ func (s *Scanner) Scan() bool {
 	}
 }
 
-func read(ctx context.Context, c chan (penny), r io.Reader, id int, split SplitFunc) {
+func read(ctx context.Context, c chan (*penny), r io.Reader, id int, split SplitFunc) {
 	var (
 		n     int // read size
 		total int // total size read
@@ -108,8 +143,13 @@ func read(ctx context.Context, c chan (penny), r io.Reader, id int, split SplitF
 	buf := pool.Get()
 	b := buf.([]byte)
 	defer func() {
-		c <- penny{toFlush: buf}
-		c <- penny{err: err}
+		c <- &penny{toDo: func() {
+			// Return previous memory buffer to pool
+			pool.Put(buf)
+		}}
+		if err != nil {
+			c <- &penny{err: err}
+		}
 		close(c)
 	}()
 
@@ -121,7 +161,12 @@ func read(ctx context.Context, c chan (penny), r io.Reader, id int, split SplitF
 		default:
 			// Add data to the buffer
 			n, err = r.Read(b[total:])
-			atEOF = err == io.EOF
+			if err != nil {
+				atEOF = err == io.EOF
+				if !atEOF {
+					return
+				}
+			}
 			total = total + n
 
 			// Slice the input buffer into tokens and send them to the chan
@@ -136,7 +181,7 @@ func read(ctx context.Context, c chan (penny), r io.Reader, id int, split SplitF
 				}
 				if splitErr == bufio.ErrFinalToken {
 					if len(tok) > 0 {
-						c <- penny{dat: tok, id: id}
+						c <- &penny{dat: tok, id: id}
 					}
 					err = io.EOF
 					return
@@ -147,7 +192,7 @@ func read(ctx context.Context, c chan (penny), r io.Reader, id int, split SplitF
 				}
 				// Return the token if a value is returned
 				if len(tok) > 0 {
-					c <- penny{dat: tok, id: id}
+					c <- &penny{dat: tok, id: id}
 				}
 				// Trim down the slice to what remains and loop
 				b = b[adv:]
@@ -155,7 +200,7 @@ func read(ctx context.Context, c chan (penny), r io.Reader, id int, split SplitF
 				if adv == 0 { // Nothing consumed
 					// If nothing was returned and we are on the last loop
 					if total > 0 && atEOF {
-						c <- penny{dat: b[:total], id: id}
+						c <- &penny{dat: b[:total], id: id}
 					}
 					break
 				}
@@ -168,32 +213,91 @@ func read(ctx context.Context, c chan (penny), r io.Reader, id int, split SplitF
 
 			if total == len(b) {
 				// If the buffer is filled, create a new buffer, copy the slice and
-				// flush the old buffer.
+				// flush the used buffer.
 				next := pool.Get()
 				nb := next.([]byte)
 				copy(nb, b)
-				c <- penny{toFlush: buf}
+				c <- &penny{toDo: func() {
+					// Return previous memory buffer to pool
+					pool.Put(buf)
+				}}
 				buf, b = next, nb
 			}
 		}
 	}
 }
 
-func makeSorters(ctx context.Context, c chan (penny), split SplitFunc, comp CompareFunc, list []io.Reader, idx []int, cancel func()) {
+var flushMe = errors.New("Flush me")
+
+func makeSorters(ctx context.Context, c chan (*penny), split SplitFunc, comp CompareFunc, filt FilterFunc, list []io.Reader, idx []int, cancel func()) {
 	if len(list) == 1 {
-		// Handle the case when one reader is given
-		go read(ctx, c, list[0], idx[0], split)
+		// Handle the case when one reader is left
+		if filt == nil {
+			// No filtering is needed, so just read from the disk
+			go read(ctx, c, list[0], idx[0], split)
+		} else {
+			// When filtering is needed, make a channel and queue up a loop to do filtering
+			reader := make(chan (*penny), 10)
+			sender := make(chan (*penny), 10)
+			go read(ctx, reader, list[0], idx[0], split)
+
+			// Range over the reader to populate the sender
+			go func() {
+				defer close(sender)
+				for dat := range reader {
+					if dat.err != nil {
+						sender <- dat
+					} else if dat.toDo != nil {
+						dat.err = flushMe
+						sender <- dat
+					} else {
+						dat.datReady = make(chan struct{})
+						go func(dat *penny) {
+							dat.dat, dat.toDo = filt(dat.dat)
+							close(dat.datReady)
+						}(dat)
+						sender <- dat
+					}
+				}
+			}()
+
+			// Range over the sender to populate the channel for sorting
+			go func() {
+				defer close(c)
+				for dat := range sender {
+					if dat.err != nil {
+						if dat.err == flushMe {
+							// Special case when reader provided the toDo action
+							dat.err = nil
+						}
+						c <- dat
+						continue
+					}
+					<-dat.datReady
+					if len(dat.dat) == 0 && dat.toDo == nil {
+						// Drop empty records!
+						continue
+					}
+					if dat.toDo != nil {
+						// Split out records with actions
+						c <- &penny{dat: dat.dat}
+						dat.dat = nil
+					}
+					c <- dat
+				}
+			}()
+		}
 		return
 	}
 	mid := len(list) / 2
-	a := make(chan (penny), 10)
-	b := make(chan (penny), 10)
-	makeSorters(ctx, a, split, comp, list[:mid], idx[:mid], nil)
-	makeSorters(ctx, b, split, comp, list[mid:], idx[mid:], nil)
+	a := make(chan (*penny), 10)
+	b := make(chan (*penny), 10)
+	makeSorters(ctx, a, split, comp, filt, list[:mid], idx[:mid], nil)
+	makeSorters(ctx, b, split, comp, filt, list[mid:], idx[mid:], nil)
 	go func() {
 		defer close(c)
 		var (
-			aDat, bDat penny
+			aDat, bDat *penny
 			aMore      = true
 			hasA       = false
 			bMore      = true
@@ -202,17 +306,27 @@ func makeSorters(ctx context.Context, c chan (penny), split SplitFunc, comp Comp
 		for {
 			select {
 			case <-ctx.Done():
+				for cleanup := range a {
+					if cleanup.toDo != nil {
+						cleanup.toDo()
+					}
+				}
+				for cleanup := range b {
+					if cleanup.toDo != nil {
+						cleanup.toDo()
+					}
+				}
 				return // returning so as to not leak the goroutine
 			default:
 				if !hasA && aMore {
 					// Get next data element(s) for comparison
 					aDat, aMore = <-a
-					if aDat.toFlush != nil || aDat.err != nil {
+					if aDat.toDo != nil || aDat.err != nil {
 						if aDat.err == io.EOF {
 							aMore = false
 							hasA = false
 						} else {
-							c <- aDat // Send the flush or err
+							c <- aDat // Send the toDo or err
 						}
 						continue
 					} else if len(aDat.dat) > 0 {
@@ -221,12 +335,12 @@ func makeSorters(ctx context.Context, c chan (penny), split SplitFunc, comp Comp
 				}
 				if !hasB && bMore {
 					bDat, bMore = <-b
-					if bDat.toFlush != nil || bDat.err != nil {
+					if bDat.toDo != nil || bDat.err != nil {
 						if bDat.err == io.EOF {
 							bMore = false
 							hasB = false
 						} else {
-							c <- bDat // Send the flush or error
+							c <- bDat // Send the toDo or error
 						}
 						continue
 					} else if len(bDat.dat) > 0 {
@@ -234,7 +348,7 @@ func makeSorters(ctx context.Context, c chan (penny), split SplitFunc, comp Comp
 					}
 				}
 				if !hasA && !hasB {
-					c <- penny{err: io.EOF}
+					c <- &penny{err: io.EOF}
 					if cancel != nil {
 						cancel()
 					}
@@ -277,9 +391,18 @@ func makeSorters(ctx context.Context, c chan (penny), split SplitFunc, comp Comp
 // result will be 0 if a == b, -1 if a < b, and +1 if a > b. A nil argument is
 // equivalent to an empty slice.
 //
-// Filtering by record is also possible, if -2 is provided then only a will be
-// used and if +2 is provided then only b will be used.
+// Record removal is also possible, if -2 is provided then only `a` will be
+// used and if +2 is provided then only `b` will be used.
 type CompareFunc func(a, b []byte, ai, bi int) int
+
+// Filter allows one to filter results just after scanning.  If there is
+// computational work needed to be done (like type conversions or looking up an
+// index in a map) the filter is the place to do this, not in the SplitFunc.
+//
+// The used() func is called after a record has been used (if one is provided).
+// The purpose of the used func handle is to help with memory management.  An
+// example of the use case for used is to return a byte slice to a sync.Pool.
+type FilterFunc func(input []byte) (output []byte, used func())
 
 // SplitFunc is the signature of the split function used to tokenize the input.
 // The arguments are an initial substring of the remaining unprocessed data and
@@ -331,7 +454,7 @@ func ScanLines(data []byte, atEOF bool, i int) (advance int, token []byte, err e
 	return bufio.ScanLines(data, atEOF)
 }
 
-// Cancel will close all the go routines and clear up the channels.
+// Cancel will close all the go routines and channels.
 func (s *Scanner) Cancel() {
 	s.cancel()
 }
@@ -341,20 +464,46 @@ func (s *Scanner) Cancel() {
 //
 // As the bulk of the sorting is done in goroutines and in the background, the
 // context is the best method to cancel any on-going sorting functions.
-func New(ctx context.Context, split SplitFunc, comp CompareFunc, list ...io.Reader) *Scanner {
-	c := make(chan (penny), 2)
+func New(ctx context.Context, list ...io.Reader) *Scanner {
 	myCtx, cancel := context.WithCancel(ctx)
-	// The sorters do the bulk of the work (in parallel).  The ideal scenaio of
-	// worker routines is a triangle number where if there are N inputs N(N-1)/2
-	// sorters are allocated.
-	idx := make([]int, len(list))
-	for i := range idx {
-		idx[i] = i
-	}
-	makeSorters(ctx, c, split, comp, list, idx, cancel)
 	return &Scanner{
-		ctx:    myCtx,
-		cancel: cancel,
-		c:      c,
+		rdrs:    list,
+		split:   ScanLines,
+		compare: BytesCompare,
+		ctx:     myCtx,
+		cancel:  cancel,
 	}
+}
+
+// Split sets the split function for the [Scanner].
+// The default split function is [ScanLines].
+//
+// Split panics if it is called after scanning has started.
+func (s *Scanner) Split(split SplitFunc) {
+	if s.scanCalled {
+		panic("Split called after Scan")
+	}
+	s.split = split
+}
+
+// Compare sets the compare function for the [Scanner].
+// The default compare function is [BytesCompare].
+//
+// Compare panics if it is called after scanning has started.
+func (s *Scanner) Compare(compare CompareFunc) {
+	if s.scanCalled {
+		panic("Compare called after Scan")
+	}
+	s.compare = compare
+}
+
+// Filter sets the filter function for the [Scanner].
+// The default filter function is none.
+//
+// Filter panics if it is called after scanning has started.
+func (s *Scanner) Filter(filter FilterFunc) {
+	if s.scanCalled {
+		panic("Filter called after Scan")
+	}
+	s.filter = filter
 }

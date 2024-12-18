@@ -37,8 +37,8 @@ type Scanner struct {
 // Unit of work, this is needed as the buffer needs to be returned to the pool
 // once the read boundary has been crossed.
 type penny struct {
-	dat      []byte        // Pointer to data which is next in this sort pool.
-	datReady chan struct{} // If filtering is used, indicate that the data is ready for use.
+	dat      []byte     // Pointer to data which is next in this sort pool.
+	datReady sync.Mutex // If filtering is used, indicate that the data is ready for use.
 
 	id   int    // Index of file data is from.
 	err  error  // Pass up any errors.
@@ -251,10 +251,10 @@ func makeSorters(ctx context.Context, c chan (*penny), split SplitFunc, comp Com
 						dat.err = flushMe
 						sender <- dat
 					} else {
-						dat.datReady = make(chan struct{})
+						dat.datReady.Lock()
 						go func(dat *penny) {
 							dat.dat, dat.toDo = filt(dat.dat)
-							close(dat.datReady)
+							dat.datReady.Unlock()
 						}(dat)
 						sender <- dat
 					}
@@ -273,7 +273,8 @@ func makeSorters(ctx context.Context, c chan (*penny), split SplitFunc, comp Com
 						c <- dat
 						continue
 					}
-					<-dat.datReady
+					dat.datReady.Lock()
+					defer dat.datReady.Unlock()
 					if len(dat.dat) == 0 && dat.toDo == nil {
 						// Drop empty records!
 						continue

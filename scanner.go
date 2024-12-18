@@ -253,7 +253,7 @@ func makeSorters(ctx context.Context, c chan (*penny), split SplitFunc, comp Com
 					} else {
 						dat.datReady.Lock()
 						go func(dat *penny) {
-							dat.dat, dat.toDo = filt(dat.dat)
+							dat.dat, dat.toDo, dat.err = filt(dat.dat, idx[0])
 							dat.datReady.Unlock()
 						}(dat)
 						sender <- dat
@@ -403,7 +403,7 @@ type CompareFunc func(a, b []byte, ai, bi int) int
 // The used() func is called after a record has been used (if one is provided).
 // The purpose of the used func handle is to help with memory management.  An
 // example of the use case for used is to return a byte slice to a sync.Pool.
-type FilterFunc func(input []byte) (output []byte, used func())
+type FilterFunc func(input []byte, id int) (output []byte, used func(), err error)
 
 // SplitFunc is the signature of the split function used to tokenize the input.
 // The arguments are an initial substring of the remaining unprocessed data and

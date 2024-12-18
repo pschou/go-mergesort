@@ -45,9 +45,9 @@ func ExampleNewFilter() {
 	s := ms.New(context.TODO(), list...)
 	// s.Split(ms.ScanLines)
 	s.Compare(ms.BytesCompareDedup)
-	s.Filter(func(in []byte) ([]byte, func()) {
+	s.Filter(func(in []byte, idx int) ([]byte, func(), error) {
 		in[0] = byte(unicode.ToUpper(rune(in[0])))
-		return in, nil
+		return in, nil, nil
 	})
 
 	for s.Scan() {

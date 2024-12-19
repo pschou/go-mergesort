@@ -329,7 +329,10 @@ func makeSorters(ctx context.Context, c chan (*penny), split SplitFunc, comp Com
 				if !hasA && aMore {
 					// Get next data element(s) for comparison
 					aDat, aMore = <-a
-					if aDat.toDo != nil || aDat.err != nil {
+					if aDat == nil { // Channel closed
+						aMore = false
+						hasA = false
+					} else if aDat.toDo != nil || aDat.err != nil {
 						if aDat.err == io.EOF {
 							aMore = false
 							hasA = false
@@ -343,7 +346,10 @@ func makeSorters(ctx context.Context, c chan (*penny), split SplitFunc, comp Com
 				}
 				if !hasB && bMore {
 					bDat, bMore = <-b
-					if bDat.toDo != nil || bDat.err != nil {
+					if bDat == nil { // Channel closed
+						bMore = false
+						hasB = false
+					} else if bDat.toDo != nil || bDat.err != nil {
 						if bDat.err == io.EOF {
 							bMore = false
 							hasB = false

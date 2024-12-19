@@ -83,6 +83,10 @@ func (s *Scanner) Scan() bool {
 	}
 	if !s.scanCalled {
 		s.scanCalled = true
+		if len(s.rdrs) == 0 {
+			s.done = true
+			return false
+		}
 
 		// The sorters do the bulk of the work (in parallel).  The ideal scenaio of
 		// worker routines is a triangle number where if there are N inputs N(N-1)/2

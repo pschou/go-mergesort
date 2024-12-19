@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 )
@@ -183,31 +184,30 @@ func read(ctx context.Context, c chan (*penny), r io.Reader, id int, split Split
 					err = bufio.ErrNegativeAdvance
 					return
 				}
-				if splitErr == bufio.ErrFinalToken {
-					if len(tok) > 0 {
-						c <- &penny{dat: tok, id: id}
-					}
-					err = io.EOF
+				if atEOF && adv == 0 {
+					c <- &penny{dat: b[:total], id: id}
 					return
 				}
-				if err != nil {
+				if splitErr != nil && splitErr != bufio.ErrFinalToken {
 					err = splitErr
 					return
 				}
-				// Return the token if a value is returned
+				// Send the token if a value is returned
 				if len(tok) > 0 {
 					c <- &penny{dat: tok, id: id}
 				}
 				// Trim down the slice to what remains and loop
 				b = b[adv:]
 				total = total - adv
-				if adv == 0 { // Nothing consumed
-					// If nothing was returned and we are on the last loop
-					if total > 0 && atEOF {
-						c <- &penny{dat: b[:total], id: id}
-					}
+				if adv == 0 {
+					// If nothing was consumed
 					break
 				}
+			}
+
+			if total > 16*1024 {
+				err = fmt.Errorf("Line too big %d in %d", total, id)
+				return
 			}
 
 			// If an error is encountered, return the error and close channel
@@ -220,12 +220,12 @@ func read(ctx context.Context, c chan (*penny), r io.Reader, id int, split Split
 				// flush the used buffer.
 				next := pool.Get()
 				nb := next.([]byte)
-				copy(nb, b)
+				copy(nb, b[:total])
+				buf, next, b = next, buf, nb
 				c <- &penny{toDo: func() {
 					// Return previous memory buffer to pool
-					pool.Put(buf)
+					pool.Put(next)
 				}}
-				buf, b = next, nb
 			}
 		}
 	}

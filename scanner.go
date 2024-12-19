@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 )
 
 // This scanner interface is similar to the bufio.Scanner interface so as to
@@ -38,8 +39,8 @@ type Scanner struct {
 // Unit of work, this is needed as the buffer needs to be returned to the pool
 // once the read boundary has been crossed.
 type penny struct {
-	dat      []byte     // Pointer to data which is next in this sort pool.
-	datReady sync.Mutex // If filtering is used, indicate that the data is ready for use.
+	datReady bool   // If filtering is used, indicate that the data is ready for use.
+	dat      []byte // Pointer to data which is next in this sort pool.
 
 	id   int    // Index of file data is from.
 	err  error  // Pass up any errors.
@@ -257,10 +258,9 @@ func makeSorters(ctx context.Context, c chan (*penny), split SplitFunc, comp Com
 						dat.err = flushMe
 						sender <- dat
 					} else {
-						dat.datReady.Lock()
 						go func(dat *penny) {
 							dat.dat, dat.toDo, dat.err = filt(dat.dat, idx[0])
-							dat.datReady.Unlock()
+							dat.datReady = true
 						}(dat)
 						sender <- dat
 					}
@@ -279,8 +279,9 @@ func makeSorters(ctx context.Context, c chan (*penny), split SplitFunc, comp Com
 						c <- dat
 						continue
 					}
-					dat.datReady.Lock()
-					defer dat.datReady.Unlock()
+					for !dat.datReady {
+						time.Sleep(time.Millisecond / 10)
+					}
 					if len(dat.dat) == 0 && dat.toDo == nil {
 						// Drop empty records!
 						continue

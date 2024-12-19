@@ -215,9 +215,9 @@ func read(ctx context.Context, c chan (*penny), r io.Reader, id int, split Split
 				return
 			}
 
-			if total == len(b) {
-				// If the buffer is filled, create a new buffer, copy the slice and
-				// flush the used buffer.
+			if total == len(b) || len(b) < 2048 {
+				// If the buffer is filled or the remaining b is small, create a new
+				// buffer, copy the slice and flush the used buffer.
 				next := pool.Get()
 				nb := next.([]byte)
 				copy(nb, b[:total])

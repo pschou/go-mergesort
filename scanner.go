@@ -185,7 +185,9 @@ func read(ctx context.Context, c chan (*penny), r io.Reader, id int, split Split
 					return
 				}
 				if atEOF && adv == 0 {
-					c <- &penny{dat: b[:total], id: id}
+					if len(tok) > 0 {
+						c <- &penny{dat: tok, id: id}
+					}
 					return
 				}
 				if splitErr != nil && splitErr != bufio.ErrFinalToken {
